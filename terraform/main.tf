@@ -1,5 +1,6 @@
 provider "aws" {
-  region = "us-east-1" # Primary region
+  alias = "primary"  # Primary region
+  region = "us-east-1" 
 }
 
 provider "aws" {
@@ -9,17 +10,20 @@ provider "aws" {
 
 # Primary region VPC, subnet, and EC2 instance
 resource "aws_vpc" "primary_vpc" {
+  provider = aws.primary 
   cidr_block = "10.0.0.0/16"
 }
 
 resource "aws_subnet" "primary_subnet" {
+    provider          = aws.primary
   vpc_id            = aws_vpc.primary_vpc.id
   cidr_block        = "10.0.1.0/24"
   availability_zone = "us-east-1a"
 }
 
 resource "aws_instance" "primary_instance" {
-  ami           = "ami-0d1cc141027ca9eb4" # Ubuntu 20.04
+    provider      = aws.primary
+  ami           = "ami-0b72821e2f351e396" # x86_64 based in US East 1
   instance_type = "t2.micro"
   subnet_id     = aws_subnet.primary_subnet.id
 }
@@ -44,6 +48,33 @@ resource "aws_instance" "secondary_instance" {
   subnet_id     = aws_subnet.secondary_subnet.id
 }
 
+# Internet gateways for primary and secondary VPCs
+resource "aws_internet_gateway" "igw" {
+    provider   = aws.primary
+    vpc_id     = aws_vpc.primary_vpc.id
+    depends_on = [aws_vpc.primary_vpc]
+}
+
+resource "aws_internet_gateway" "igw_secondary" {
+    provider   = aws.primary
+    vpc_id     = aws_vpc.secondary_vpc.id
+    depends_on = [aws_vpc.secondary_vpc]
+}
+
+# Elastic IP for primary instance
+resource "aws_eip" "primary" {
+    provider   = aws.primary
+    instance   = aws_instance.primary_instance.id
+    depends_on = [aws_instance.primary_instance]
+}
+
+# Elastic IP for secondary instance
+resource "aws_eip" "secondary" {
+    domain            = "vpc"
+    provider          = aws.secondary
+    network_interface = aws_instance.secondary_instance.primary_network_interface_id
+    depends_on        = [aws_instance.secondary_instance, aws_internet_gateway.igw_secondary]
+}
 # IAM role for replication
 resource "aws_iam_role" "replication_role" {
   name = "replication-role"
@@ -93,7 +124,7 @@ resource "aws_iam_policy" "replication_policy" {
           "s3:GetObjectVersionTagging"
         ]
         Effect = "Allow"
-        Resource = "${aws_s3_bucket.secondary_bucket.arn}/*"
+        Resource = "${aws_s3_bucket.secondarydp_bucket.arn}/*"
       }
     ]
   })
@@ -106,7 +137,8 @@ resource "aws_iam_role_policy_attachment" "replication_policy_attachment" {
 
 # S3 bucket in primary region with versioning and replication configuration
 resource "aws_s3_bucket" "primary_bucket" {
-  bucket = "primary-bucket"
+    provider = aws.primary
+    bucket   = "primary-bucket"
 }
 
 resource "aws_s3_bucket_versioning" "primary_bucket_versioning" {
@@ -125,30 +157,29 @@ resource "aws_s3_bucket_replication_configuration" "primary_bucket_replication" 
   rule {
     id     = "replication-rule"
     status = "Enabled"
-    prefix = ""
+
+    filter {
+        prefix = ""
+        }
 
     destination {
-      bucket        = aws_s3_bucket.secondary_bucket.arn
+      bucket        = aws_s3_bucket.secondarydp_bucket.arn
     }
   }
 }
 
 # S3 bucket in secondary region with versioning
-resource "aws_s3_bucket" "secondary_bucket" {
+resource "aws_s3_bucket" "secondarydp_bucket" {
   provider = aws.secondary
-  bucket   = "secondary-bucket"
+  bucket   = "secondarydp-bucket"
 }
 
-resource "aws_s3_bucket_versioning" "secondary_bucket_versioning" {
-  bucket = aws_s3_bucket.secondary_bucket.id
+resource "aws_s3_bucket_versioning" "secondarydp_bucket_versioning" {
+  provider = aws.secondary
+  bucket   = aws_s3_bucket.secondarydp_bucket.id
   versioning_configuration {
     status = "Enabled"
   }
-}
-
-# Elastic IP for primary instance
-resource "aws_eip" "primary" {
-  instance = aws_instance.primary_instance.id
 }
 
 # Route53 health check and failover routing policies
@@ -166,7 +197,7 @@ resource "aws_route53_health_check" "primary_health_check" {
 }
 
 resource "aws_route53_health_check" "secondary_health_check" {
-  fqdn              = aws_s3_bucket.secondary_bucket.bucket_regional_domain_name
+  fqdn              = aws_s3_bucket.secondarydp_bucket.bucket_regional_domain_name
   port              = 443
   request_interval  = 30
   failure_threshold = 3
@@ -203,7 +234,7 @@ resource "aws_route53_record" "secondary_record" {
     type = "SECONDARY"
   }
 
-  records = [aws_instance.secondary_instance.public_ip] 
+  records = [aws_eip.secondary.public_ip] 
   ttl     = 60
 
   health_check_id = aws_route53_health_check.secondary_health_check.id 
