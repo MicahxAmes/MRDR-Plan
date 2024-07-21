@@ -38,7 +38,7 @@ resource "aws_subnet" "secondary_subnet" {
   provider          = aws.secondary
   vpc_id            = aws_vpc.secondary_vpc.id
   cidr_block        = "10.1.1.0/24"
-  availability_zone = "us-west-2a"
+  availability_zone = "us-west-2"
 }
 
 resource "aws_instance" "secondary_instance" {
